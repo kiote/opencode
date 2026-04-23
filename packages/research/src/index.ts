@@ -85,4 +85,4 @@ export const ResearchPlugin: Plugin = async (ctx, options) => {
 }
 
 // Default export for OpenCode plugin loader
-export default ResearchPlugin
+export default { id: "@opencode-ai/research", server: ResearchPlugin }

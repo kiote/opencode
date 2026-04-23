@@ -1,11 +1,7 @@
-import { getDb, trajectorySteps } from "../storage/index.js"
 import type { TrajectoryTracker } from "../replay/trajectory.js"
 
 /**
  * tool.execute.after hook — captures every tool execution into the trajectory.
- *
- * This is the primary data collection point. Every tool call (bash, edit, read,
- * write, grep, etc.) flows through here with full input/output.
  */
 export function createToolAfterHook(tracker: TrajectoryTracker) {
   return async (

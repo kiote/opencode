@@ -1,52 +1,42 @@
 import { tool } from "@opencode-ai/plugin/tool"
-import { getDb, trajectories, trajectorySteps, toolPatterns, experiencePatterns, lessons } from "../storage/index.js"
-import { sql } from "drizzle-orm"
+import { getDb } from "../storage/db.js"
 
 /**
- * /research-stats tool — query the research database for insights.
- *
- * Shows trajectory counts, most common tool patterns, experience patterns, etc.
- * Useful for understanding what the research layer has learned.
+ * research_stats tool — query the research database for insights.
  */
 export const researchStatsTool = tool({
   description: "Show research plugin statistics: trajectory count, tool patterns, experience patterns, and lessons learned.",
   args: {
     scope: tool.schema.enum(["all", "trajectories", "patterns", "experience", "lessons"]).default("all")
-      .describe("What stats to show"),
+      .describe("What stats to show: all, trajectories, patterns, experience, or lessons"),
   },
   async execute(args) {
     const db = getDb()
     const sections: string[] = []
 
     if (args.scope === "all" || args.scope === "trajectories") {
-      const trajCount = db.select({ count: sql<number>`count(*)` }).from(trajectories).get()
-      const stepCount = db.select({ count: sql<number>`count(*)` }).from(trajectorySteps).get()
-      const topTools = db
-        .select({
-          tool: trajectorySteps.toolName,
-          count: sql<number>`count(*)`,
-        })
-        .from(trajectorySteps)
-        .groupBy(trajectorySteps.toolName)
-        .orderBy(sql`count(*) desc`)
-        .limit(10)
-        .all()
+      const trajCount = db.query("SELECT count(*) as count FROM trajectories").get() as any
+      const stepCount = db.query("SELECT count(*) as count FROM trajectory_steps").get() as any
+      const topTools = db.query(
+        "SELECT tool_name, count(*) as cnt FROM trajectory_steps GROUP BY tool_name ORDER BY cnt DESC LIMIT 10"
+      ).all() as any[]
 
-      sections.push(`## Trajectories\n- Total: ${trajCount?.count ?? 0}\n- Total steps: ${stepCount?.count ?? 0}\n- Top tools: ${topTools.map(t => `${t.tool}(${t.count})`).join(", ") || "none"}`)
+      const toolStr = topTools.map((t: any) => `${t.tool_name}(${t.cnt})`).join(", ") || "none"
+      sections.push(`## Trajectories\n- Total: ${trajCount?.count ?? 0}\n- Total steps: ${stepCount?.count ?? 0}\n- Top tools: ${toolStr}`)
     }
 
     if (args.scope === "all" || args.scope === "patterns") {
-      const patCount = db.select({ count: sql<number>`count(*)` }).from(toolPatterns).get()
+      const patCount = db.query("SELECT count(*) as count FROM tool_patterns").get() as any
       sections.push(`## Tool Patterns\n- Discovered: ${patCount?.count ?? 0}`)
     }
 
     if (args.scope === "all" || args.scope === "experience") {
-      const expCount = db.select({ count: sql<number>`count(*)` }).from(experiencePatterns).get()
+      const expCount = db.query("SELECT count(*) as count FROM experience_patterns").get() as any
       sections.push(`## Experience Patterns\n- Extracted: ${expCount?.count ?? 0}`)
     }
 
     if (args.scope === "all" || args.scope === "lessons") {
-      const lessonCount = db.select({ count: sql<number>`count(*)` }).from(lessons).get()
+      const lessonCount = db.query("SELECT count(*) as count FROM lessons").get() as any
       sections.push(`## Lessons Learned\n- Total: ${lessonCount?.count ?? 0}`)
     }
 

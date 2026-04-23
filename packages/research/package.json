@@ -5,12 +5,14 @@
   "type": "module",
   "license": "MIT",
   "description": "Research-backed enhancements for OpenCode: trajectory replay, meta-tools, experience extraction, and more.",
+  "main": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts"
   },
   "files": [
     "dist"
@@ -18,14 +20,12 @@
   "dependencies": {
     "@opencode-ai/plugin": "workspace:*",
     "@opencode-ai/sdk": "workspace:*",
-    "better-sqlite3": "^11.0.0",
-    "drizzle-orm": "^0.44.0",
     "zod": "catalog:"
   },
   "devDependencies": {
     "@tsconfig/node22": "catalog:",
-    "@types/better-sqlite3": "^7.6.8",
     "@types/node": "catalog:",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "@types/bun": "catalog:"
   }
 }
