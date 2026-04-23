@@ -4,27 +4,26 @@ import { TrajectoryTracker } from "./replay/trajectory.js"
 import { createToolAfterHook } from "./hooks/tool-after.js"
 import { createEventHook } from "./hooks/event.js"
 import { researchStatsTool } from "./tools/research-stats.js"
+import { createReplayCheckTool } from "./tools/replay-check.js"
+import { createSystemHook } from "./hooks/system.js"
 import { getDb } from "./storage/index.js"
 
 /**
  * OpenCode Research Plugin
  *
  * Layers research-backed enhancements onto OpenCode:
- * - Phase 1: Trajectory capture (tool calls, session lifecycle)
- * - Phase 2: SWE-Replay (trajectory recycling & branching)
- * - Phase 3: Meta-tools (composite tool discovery)
- * - Phase 4: Experience extraction (AutoRefine patterns)
- * - Phase 5: Context engineering (model-tier-aware optimization)
- * - Phase 6: TraceCoder (runtime trace analysis)
- * - Phase 7: FLARE planning (future-aware lookahead)
- * - Phase 8: Task psychometrics (difficulty prediction)
- *
- * All features are independently toggleable via config.
+ * - Phase 0: Plugin scaffold + trajectory capture ✅
+ * - Phase 2: SWE-Replay (trajectory recycling & branching) ✅
+ * - Phase 3: Meta-tools (composite tool discovery) — TODO
+ * - Phase 4: Experience extraction (AutoRefine) — TODO
+ * - Phase 5: Context engineering — TODO
+ * - Phase 6: TraceCoder (trace analysis) — TODO
+ * - Phase 7: FLARE planning — TODO
+ * - Phase 8: Task psychometrics — TODO
  *
  * Papers: see wikis/agentic-development/ for full documentation.
  */
 export const ResearchPlugin: Plugin = async (ctx, options) => {
-  // Parse and resolve config with defaults
   const parsed = ResearchConfig.safeParse(options ?? {})
   const config = resolveConfig(parsed.success ? parsed.data : undefined)
 
@@ -37,52 +36,48 @@ export const ResearchPlugin: Plugin = async (ctx, options) => {
   console.log(`[research] Plugin loaded for ${ctx.directory}`)
   console.log(`[research] Modules: replay=${config.replay.enabled} metaTools=${config.metaTools.enabled} experience=${config.experience.enabled} tracing=${config.tracing.enabled} context=${config.context.enabled}`)
 
-  // Build hooks based on enabled modules
   const hooks: Hooks = {}
 
-  // --- Always active: trajectory capture (foundation for everything) ---
+  // --- Always active: trajectory capture ---
   hooks["tool.execute.after"] = createToolAfterHook(tracker)
   hooks["event"] = createEventHook(tracker)
 
   // --- Custom tools ---
   hooks.tool = {
     research_stats: researchStatsTool,
+    ...(config.replay.enabled ? { replay_check: createReplayCheckTool(config) } : {}),
   }
 
-  // --- Phase 3: Meta-tools (when enabled) ---
+  // --- Phase 2: SWE-Replay auto-injection ---
+  if (config.replay.enabled) {
+    hooks["experimental.chat.system.transform"] = createSystemHook(config, ctx.directory)
+  }
+
+  // --- Phase 3: Meta-tools ---
   if (config.metaTools.enabled) {
-    // TODO: Phase 3 — pattern mining + composite tool registration
+    // TODO
   }
 
-  // --- Phase 4: Experience injection (when enabled) ---
-  if (config.experience.enabled) {
-    hooks["experimental.chat.system.transform"] = async (_input, output) => {
-      // TODO: Phase 4 — inject relevant experience patterns into system prompt
-      output.system.push("<!-- research:experience module active -->")
-    }
-  }
-
-  // --- Phase 5: Context engineering (when enabled) ---
+  // --- Phase 5: Context engineering ---
   if (config.context.enabled) {
     hooks["chat.params"] = async (_input, _output) => {
-      // TODO: Phase 5 — model-tier-aware parameter tuning
+      // TODO: model-tier-aware parameter tuning
     }
   }
 
-  // --- Phase 7: FLARE planning (when enabled) ---
+  // --- Phase 7: FLARE ---
   if (config.planning.enabled) {
-    // TODO: Phase 7 — requires core patch for mid-generation hook
+    // TODO: requires core patch
   }
 
-  // --- Phase 8: Task psychometrics (when enabled) ---
+  // --- Phase 8: Psychometrics ---
   if (config.psychometrics.enabled) {
     hooks["chat.message"] = async (_input, _output) => {
-      // TODO: Phase 8 — analyze task difficulty from message content
+      // TODO
     }
   }
 
   return hooks
 }
 
-// Default export for OpenCode plugin loader
 export default { id: "@opencode-ai/research", server: ResearchPlugin }
