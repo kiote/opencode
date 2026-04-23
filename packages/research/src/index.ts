@@ -3,34 +3,34 @@ import { ResearchConfig, resolveConfig } from "./config.js"
 import { TrajectoryTracker } from "./replay/trajectory.js"
 import { createToolAfterHook } from "./hooks/tool-after.js"
 import { createEventHook } from "./hooks/event.js"
+import { createSystemHook } from "./hooks/system.js"
+import { createToolBeforeHook } from "./hooks/tool-before.js"
 import { researchStatsTool } from "./tools/research-stats.js"
 import { createReplayCheckTool } from "./tools/replay-check.js"
-import { createSystemHook } from "./hooks/system.js"
+import { createMetaToolsTool } from "./tools/meta-tools-manage.js"
+import { getSavedPatterns } from "./meta-tools/miner.js"
+import { generateCompositeTools } from "./meta-tools/composite.js"
 import { getDb } from "./storage/index.js"
 
 /**
  * OpenCode Research Plugin
  *
- * Layers research-backed enhancements onto OpenCode:
+ * Research-backed enhancements for OpenCode:
  * - Phase 0: Plugin scaffold + trajectory capture ✅
  * - Phase 2: SWE-Replay (trajectory recycling & branching) ✅
- * - Phase 3: Meta-tools (composite tool discovery) — TODO
+ * - Phase 3: Meta-tools (composite tool discovery) ✅
  * - Phase 4: Experience extraction (AutoRefine) — TODO
  * - Phase 5: Context engineering — TODO
  * - Phase 6: TraceCoder (trace analysis) — TODO
  * - Phase 7: FLARE planning — TODO
  * - Phase 8: Task psychometrics — TODO
- *
- * Papers: see wikis/agentic-development/ for full documentation.
  */
 export const ResearchPlugin: Plugin = async (ctx, options) => {
   const parsed = ResearchConfig.safeParse(options ?? {})
   const config = resolveConfig(parsed.success ? parsed.data : undefined)
 
-  // Initialize database
   getDb()
 
-  // Initialize trajectory tracker
   const tracker = new TrajectoryTracker(ctx.directory)
 
   console.log(`[research] Plugin loaded for ${ctx.directory}`)
@@ -43,19 +43,36 @@ export const ResearchPlugin: Plugin = async (ctx, options) => {
   hooks["event"] = createEventHook(tracker)
 
   // --- Custom tools ---
-  hooks.tool = {
+  const customTools: Record<string, any> = {
     research_stats: researchStatsTool,
-    ...(config.replay.enabled ? { replay_check: createReplayCheckTool(config) } : {}),
   }
+
+  if (config.replay.enabled) {
+    customTools.replay_check = createReplayCheckTool(config)
+  }
+
+  if (config.metaTools.enabled) {
+    customTools.meta_tools = createMetaToolsTool(config)
+
+    // Load promoted patterns as composite tools
+    const promotedPatterns = getSavedPatterns(config.metaTools.minFrequency)
+      .filter(p => p.metaToolId !== null)
+    const compositeTools = generateCompositeTools(promotedPatterns)
+    Object.assign(customTools, compositeTools)
+
+    if (Object.keys(compositeTools).length > 0) {
+      console.log(`[research:meta-tools] Loaded ${Object.keys(compositeTools).length} composite tools`)
+    }
+
+    // Pattern detection hook
+    hooks["tool.execute.before"] = createToolBeforeHook(config.metaTools.minFrequency)
+  }
+
+  hooks.tool = customTools
 
   // --- Phase 2: SWE-Replay auto-injection ---
   if (config.replay.enabled) {
     hooks["experimental.chat.system.transform"] = createSystemHook(config, ctx.directory)
-  }
-
-  // --- Phase 3: Meta-tools ---
-  if (config.metaTools.enabled) {
-    // TODO
   }
 
   // --- Phase 5: Context engineering ---
