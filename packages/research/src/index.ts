@@ -5,6 +5,7 @@ import { createToolAfterHook } from "./hooks/tool-after.js"
 import { createEventHook } from "./hooks/event.js"
 import { createSystemHook } from "./hooks/system.js"
 import { createToolBeforeHook } from "./hooks/tool-before.js"
+import { createParamsHook } from "./hooks/params.js"
 import { researchStatsTool } from "./tools/research-stats.js"
 import { createReplayCheckTool } from "./tools/replay-check.js"
 import { createMetaToolsTool } from "./tools/meta-tools-manage.js"
@@ -17,13 +18,13 @@ import { getDb } from "./storage/index.js"
  * OpenCode Research Plugin
  *
  * Research-backed enhancements for OpenCode:
- * - Phase 0: Plugin scaffold + trajectory capture ✅
- * - Phase 2: SWE-Replay (trajectory recycling & branching) ✅
- * - Phase 3: Meta-tools (composite tool discovery) ✅
- * - Phase 4: Experience extraction (AutoRefine) ✅
- * - Phase 5: Context engineering — TODO
- * - Phase 6: TraceCoder (trace analysis) — TODO
- * - Phase 7: FLARE planning — TODO
+ * - Phase 0: Trajectory capture ✅
+ * - Phase 2: SWE-Replay ✅
+ * - Phase 3: Meta-tools / AWO ✅
+ * - Phase 4: AutoRefine experience ✅
+ * - Phase 5: Context engineering ✅
+ * - Phase 6: TraceCoder ✅
+ * - Phase 7: FLARE planning — TODO (needs core patch)
  * - Phase 8: Task psychometrics — TODO
  */
 export const ResearchPlugin: Plugin = async (ctx, options) => {
@@ -39,8 +40,8 @@ export const ResearchPlugin: Plugin = async (ctx, options) => {
 
   const hooks: Hooks = {}
 
-  // --- Always active: trajectory capture ---
-  hooks["tool.execute.after"] = createToolAfterHook(tracker)
+  // --- Trajectory capture + TraceCoder failure analysis ---
+  hooks["tool.execute.after"] = createToolAfterHook(tracker, config.tracing.enabled)
   hooks["event"] = createEventHook(tracker, config.experience.enabled)
 
   // --- Custom tools ---
@@ -74,15 +75,17 @@ export const ResearchPlugin: Plugin = async (ctx, options) => {
     hooks["experimental.chat.system.transform"] = createSystemHook(config, ctx.directory)
   }
 
-  // --- Phase 5: Context engineering ---
+  // --- Context engineering: model-tier-aware params ---
   if (config.context.enabled) {
-    hooks["chat.params"] = async (_input, _output) => {}
+    hooks["chat.params"] = createParamsHook(config)
   }
 
+  // --- Phase 7: FLARE (future) ---
   if (config.planning.enabled) {
-    // TODO: Phase 7
+    // Requires mid-generation hook — core patch needed
   }
 
+  // --- Phase 8: Psychometrics (future) ---
   if (config.psychometrics.enabled) {
     hooks["chat.message"] = async (_input, _output) => {}
   }
