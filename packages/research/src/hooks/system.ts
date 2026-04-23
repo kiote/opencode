@@ -4,43 +4,50 @@ import {
   getTrajectorySteps,
   formatTrajectoryAsContext,
 } from "../replay/engine.js"
+import { getRelevantExperience, formatExperienceContext, markUsed } from "../experience/extractor.js"
 import type { ResolvedConfig } from "../config.js"
 
 /**
- * experimental.chat.system.transform hook — auto-inject replay context.
+ * experimental.chat.system.transform hook
  *
- * When a new session starts in a project with prior trajectories,
- * this hook checks if replay would be beneficial and injects the
- * prior trajectory as system-level context.
- *
- * This is the automatic version — the agent doesn't need to call
- * replay_check manually. The context appears in the system prompt.
+ * Injects two types of context:
+ * 1. SWE-Replay: prior trajectory context when replay is beneficial
+ * 2. AutoRefine: learned experience patterns relevant to the project
  */
 export function createSystemHook(config: ResolvedConfig, projectDir: string) {
-  // Track which sessions already got replay context to avoid re-injecting
   const injectedSessions = new Set<string>()
 
   return async (
     input: { sessionID?: string; model: any },
     output: { system: string[] },
   ) => {
-    if (!config.replay.enabled) return
-
-    // Only inject once per session
     const sessionId = input.sessionID
     if (!sessionId || injectedSessions.has(sessionId)) return
     injectedSessions.add(sessionId)
 
-    const trajectories = findRelevantTrajectories(projectDir, 5)
-    const decision = shouldReplay(trajectories, config.replay.branchScoreThreshold)
+    // --- SWE-Replay context ---
+    if (config.replay.enabled) {
+      const trajectories = findRelevantTrajectories(projectDir, 5)
+      const decision = shouldReplay(trajectories, config.replay.branchScoreThreshold)
 
-    if (decision.action !== "replay") return
+      if (decision.action === "replay") {
+        const steps = getTrajectorySteps(decision.trajectoryId, decision.branchPoint.stepIndex)
+        const context = formatTrajectoryAsContext(steps)
+        if (context) output.system.push(context)
+      }
+    }
 
-    const steps = getTrajectorySteps(decision.trajectoryId, decision.branchPoint.stepIndex)
-    const context = formatTrajectoryAsContext(steps)
-
-    if (context) {
-      output.system.push(context)
+    // --- AutoRefine experience context ---
+    if (config.experience.enabled) {
+      const patterns = getRelevantExperience(projectDir, undefined, 15)
+      const context = formatExperienceContext(patterns)
+      if (context) {
+        output.system.push(context)
+        // Mark patterns as used
+        for (const p of patterns) {
+          markUsed(p.id)
+        }
+      }
     }
   }
 }

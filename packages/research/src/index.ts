@@ -8,6 +8,7 @@ import { createToolBeforeHook } from "./hooks/tool-before.js"
 import { researchStatsTool } from "./tools/research-stats.js"
 import { createReplayCheckTool } from "./tools/replay-check.js"
 import { createMetaToolsTool } from "./tools/meta-tools-manage.js"
+import { createExperienceTool } from "./tools/experience-manage.js"
 import { getSavedPatterns } from "./meta-tools/miner.js"
 import { generateCompositeTools } from "./meta-tools/composite.js"
 import { getDb } from "./storage/index.js"
@@ -19,7 +20,7 @@ import { getDb } from "./storage/index.js"
  * - Phase 0: Plugin scaffold + trajectory capture ✅
  * - Phase 2: SWE-Replay (trajectory recycling & branching) ✅
  * - Phase 3: Meta-tools (composite tool discovery) ✅
- * - Phase 4: Experience extraction (AutoRefine) — TODO
+ * - Phase 4: Experience extraction (AutoRefine) ✅
  * - Phase 5: Context engineering — TODO
  * - Phase 6: TraceCoder (trace analysis) — TODO
  * - Phase 7: FLARE planning — TODO
@@ -40,7 +41,7 @@ export const ResearchPlugin: Plugin = async (ctx, options) => {
 
   // --- Always active: trajectory capture ---
   hooks["tool.execute.after"] = createToolAfterHook(tracker)
-  hooks["event"] = createEventHook(tracker)
+  hooks["event"] = createEventHook(tracker, config.experience.enabled)
 
   // --- Custom tools ---
   const customTools: Record<string, any> = {
@@ -53,45 +54,37 @@ export const ResearchPlugin: Plugin = async (ctx, options) => {
 
   if (config.metaTools.enabled) {
     customTools.meta_tools = createMetaToolsTool(config)
-
-    // Load promoted patterns as composite tools
-    const promotedPatterns = getSavedPatterns(config.metaTools.minFrequency)
-      .filter(p => p.metaToolId !== null)
+    const promotedPatterns = getSavedPatterns(config.metaTools.minFrequency).filter(p => p.metaToolId !== null)
     const compositeTools = generateCompositeTools(promotedPatterns)
     Object.assign(customTools, compositeTools)
-
     if (Object.keys(compositeTools).length > 0) {
       console.log(`[research:meta-tools] Loaded ${Object.keys(compositeTools).length} composite tools`)
     }
-
-    // Pattern detection hook
     hooks["tool.execute.before"] = createToolBeforeHook(config.metaTools.minFrequency)
+  }
+
+  if (config.experience.enabled) {
+    customTools.experience = createExperienceTool(config)
   }
 
   hooks.tool = customTools
 
-  // --- Phase 2: SWE-Replay auto-injection ---
-  if (config.replay.enabled) {
+  // --- System prompt injection (replay + experience) ---
+  if (config.replay.enabled || config.experience.enabled) {
     hooks["experimental.chat.system.transform"] = createSystemHook(config, ctx.directory)
   }
 
   // --- Phase 5: Context engineering ---
   if (config.context.enabled) {
-    hooks["chat.params"] = async (_input, _output) => {
-      // TODO: model-tier-aware parameter tuning
-    }
+    hooks["chat.params"] = async (_input, _output) => {}
   }
 
-  // --- Phase 7: FLARE ---
   if (config.planning.enabled) {
-    // TODO: requires core patch
+    // TODO: Phase 7
   }
 
-  // --- Phase 8: Psychometrics ---
   if (config.psychometrics.enabled) {
-    hooks["chat.message"] = async (_input, _output) => {
-      // TODO
-    }
+    hooks["chat.message"] = async (_input, _output) => {}
   }
 
   return hooks
