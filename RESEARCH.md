@@ -1,211 +1,337 @@
-# OpenCode Research Fork — Design Document
+# OpenCode Research Fork — Design Document v2
 
 > **Fork:** `kiote/opencode` (from `anomalyco/opencode`)
 > **Goal:** Layer research-backed enhancements onto OpenCode while maintaining upstream compatibility.
-> **Date:** 2026-04-23
+> **Date:** 2026-04-23 (v2 — revised after codebase analysis)
 
-## 1. Architecture Principle: The Research Layer
+## 0. Key Codebase Findings
 
-All our additions live in a single directory: `packages/opencode/src/research/`.
-This minimizes merge conflicts with upstream. We touch upstream files only through
-**thin integration points** — hooks, event listeners, and module augmentation.
+After studying the codebase, the integration story is much cleaner than initially planned:
+
+**OpenCode already has a plugin system with rich hooks:**
+- `chat.message` — intercept/modify incoming messages
+- `chat.params` — modify LLM parameters (temperature, maxTokens, etc.)
+- `tool.execute.before` — intercept tool calls before execution
+- `tool.execute.after` — intercept tool results after execution
+- `tool.definition` — modify tool descriptions/parameters sent to LLM
+- `experimental.chat.system.transform` — modify system prompt
+- `experimental.chat.messages.transform` — modify message history
+- `experimental.session.compacting` — customize compaction
+- `event` — receive all Bus events
+- `tool` — register custom tools
+- `permission.ask` — intercept permission checks
+
+**Core architecture:**
+- Effect (functional effect system) with layered services
+- Bus: typed pub/sub (`BusEvent.define` + `bus.publish`/`subscribe`)
+- Storage: Drizzle ORM + SQLite
+- Session processor: `start-step → tool-call → tool-result → finish-step` loop
+- Snapshots: file-system snapshots at step boundaries (already tracks diffs!)
+- Package manager: Bun
+
+## 1. Revised Architecture: Plugin-First + Minimal Core Patches
+
+### Tier 1: Plugin (preferred — zero merge conflicts)
+
+A research plugin: `packages/research/` as a proper OpenCode plugin package.
+This covers ~70% of what we need:
 
 ```
-packages/opencode/src/research/
-├── index.ts              # Research layer initialization & registration
-├── replay/               # SWE-Replay: trajectory recycling & branching
-│   ├── trajectory.ts     # Trajectory capture, storage, serialization
-│   ├── branch.ts         # Branch-point detection & replay logic
-│   └── index.ts
-├── meta-tools/           # AWO: auto-discovered composite tools
-│   ├── pattern-miner.ts  # Analyze tool-call traces for recurring sequences
-│   ├── composite.ts      # Meta-tool definition & deterministic execution
-│   └── index.ts
-├── planning/             # FLARE: future-aware lookahead
-│   ├── lookahead.ts      # Reward estimation & value propagation
-│   ├── commitment.ts     # Limited commitment with rollback
-│   └── index.ts
-├── experience/           # AutoRefine: reusable expertise extraction
-│   ├── extractor.ts      # Dual-form pattern extraction from trajectories
-│   ├── subagent.ts       # Spawned procedural subagents
-│   ├── skills.ts         # Extracted skill patterns (guidelines/snippets)
-│   ├── maintenance.ts    # Score, prune, merge patterns
-│   └── index.ts
-├── tracing/              # TraceCoder: runtime trace collection
-│   ├── probe.ts          # Code instrumentation & diagnostic probes
-│   ├── causal.ts         # Causal analysis on traces
-│   ├── lessons.ts        # Historical lesson learning mechanism
-│   └── index.ts
-├── context/              # Structured CE + MCE: context optimization
-│   ├── format.ts         # Model-tier-aware format selection
-│   ├── evolution.ts      # MCE: meta-agent context skill evolution
-│   └── index.ts
-├── psychometrics/        # Agent Psychometrics: task difficulty prediction
-│   ├── irt.ts            # Item Response Theory model
-│   ├── features.ts       # Task feature extraction
-│   └── index.ts
-└── storage/              # Research-specific persistence
-    ├── trajectories.sql.ts
-    ├── patterns.sql.ts
-    ├── lessons.sql.ts
-    └── index.ts
+packages/research/
+├── package.json           # @opencode-ai/research-plugin
+├── src/
+│   ├── index.ts           # Plugin entry: exports server function
+│   ├── hooks/             # Plugin hook implementations
+│   │   ├── message.ts     # chat.message — inject experience context
+│   │   ├── system.ts      # chat.system.transform — context optimization
+│   │   ├── params.ts      # chat.params — model-tier-aware params
+│   │   ├── tool-before.ts # tool.execute.before — meta-tool interception
+│   │   ├── tool-after.ts  # tool.execute.after — trajectory capture
+│   │   └── event.ts       # event — Bus event listener for all events
+│   ├── tools/             # Custom tools registered via plugin
+│   │   ├── replay.ts      # /replay command — replay from checkpoint
+│   │   └── experience.ts  # /experience — query extracted patterns
+│   ├── replay/            # SWE-Replay: trajectory recycling
+│   │   ├── trajectory.ts  # Capture & serialize session trajectories
+│   │   ├── branch.ts      # Branch-point detection & scoring
+│   │   └── replay.ts      # Replay decision logic
+│   ├── meta-tools/        # AWO: composite tool discovery
+│   │   ├── miner.ts       # Pattern mining from tool-call traces
+│   │   └── composite.ts   # Generated meta-tool definitions
+│   ├── experience/        # AutoRefine: reusable expertise
+│   │   ├── extractor.ts   # Dual-form pattern extraction
+│   │   ├── skills.ts      # Skill pattern storage
+│   │   └── maintenance.ts # Score, prune, merge
+│   ├── tracing/           # TraceCoder: runtime trace analysis
+│   │   ├── probe.ts       # Trace collection from bash tool
+│   │   ├── causal.ts      # Root cause analysis
+│   │   └── lessons.ts     # Historical lesson learning
+│   ├── context/           # Context engineering
+│   │   ├── format.ts      # Model-tier-aware format selection
+│   │   └── optimizer.ts   # System prompt optimization
+│   ├── psychometrics/     # Task difficulty prediction
+│   │   ├── irt.ts         # IRT model
+│   │   └── router.ts      # Route hard tasks differently
+│   └── storage/           # Persistent storage for research data
+│       ├── db.ts          # Separate SQLite DB (not OpenCode's)
+│       └── schema.ts      # Drizzle schema for trajectories, patterns, etc.
 ```
 
-## 2. Integration Points with Upstream
+### Tier 2: Core patches (only when plugin hooks are insufficient)
 
-OpenCode uses Effect (functional effect system) with layered services. We integrate
-through the existing extension mechanisms:
+Some features need deeper integration:
 
-### 2.1 Session Processor Hooks
-The processor (`session/processor.ts`) handles the core LLM loop. We need:
-- **Pre-process hook** — inject context optimization, task difficulty prediction
-- **Post-step hook** — capture trajectory steps, mine tool-call patterns
-- **Post-session hook** — extract experience patterns, store trajectories
+| Feature | Why plugin isn't enough | Patch location |
+|---|---|---|
+| FLARE planning | Needs to intercept mid-generation, add lookahead steps | `session/processor.ts` |
+| Trajectory branching | Needs to restore session to checkpoint & re-run | `session/session.ts` |
+| Step-level snapshots | Already captured! (`start-step`/`finish-step` events) | Read-only |
 
-**Implementation:** Wrap the existing `SessionProcessor.Service` layer with our
-research layer that intercepts events via the `Bus` (event system).
+**Branching strategy for patches:**
+- `dev` branch: tracks upstream
+- `research` branch: our patches + plugin
+- Patches are minimal and wrapped in `// RESEARCH:` comments for easy identification
+- Each patch gets a companion test that verifies the hook exists
 
-### 2.2 Tool Registry Extension
-Tools are registered in `tool/registry.ts`. Meta-tools register as regular tools
-but execute deterministically (no LLM reasoning for bundled sub-steps).
+### Tier 3: Upstream PRs (contribute back)
 
-### 2.3 Agent Augmentation
-Agents are defined in `agent/agent.ts`. The `plan` agent is the natural place
-for FLARE integration — it already does read-only analysis.
+Some enhancements are generally useful and should be PR'd upstream:
+- Additional Bus events (e.g., `session.complete` with full trajectory)
+- Plugin hook for mid-generation interception (enables FLARE for everyone)
+- Trajectory export/import API
 
-### 2.4 Storage Extension
-OpenCode uses Drizzle ORM with SQLite. We add research-specific tables via
-migration files, keeping them namespaced (`research_trajectories`, etc.).
+## 2. Plugin Hook Mapping
 
-## 3. Implementation Phases
+How each research module maps to existing plugin hooks:
 
-### Phase 1: Foundation (Week 1)
-- [ ] Research layer scaffold (`src/research/` with index, storage)
-- [ ] Bus event listeners for trajectory capture
-- [ ] Research-specific Drizzle tables & migrations
-- [ ] Config extension: `research` section in `opencode.json`
-- [ ] Feature flags for each research module (off by default)
+```
+┌─────────────────────┬────────────────────────────────────────────────┐
+│ Research Module      │ Plugin Hooks Used                             │
+├─────────────────────┼────────────────────────────────────────────────┤
+│ Trajectory Capture  │ event (session.status → idle)                 │
+│                     │ tool.execute.after (capture each tool result)  │
+│                     │ finish-step events (via event hook)            │
+├─────────────────────┼────────────────────────────────────────────────┤
+│ SWE-Replay          │ chat.message (inject replay decision)         │
+│                     │ tool (custom /replay command)                  │
+│                     │ [PATCH: session restore from checkpoint]       │
+├─────────────────────┼────────────────────────────────────────────────┤
+│ Meta-tools          │ tool.execute.before (intercept known seqs)    │
+│                     │ tool.execute.after (mine patterns)             │
+│                     │ tool.definition (register composite tools)     │
+├─────────────────────┼────────────────────────────────────────────────┤
+│ Experience/AutoRef. │ event (session idle → extract experience)     │
+│                     │ experimental.chat.system.transform (inject)    │
+│                     │ chat.message (augment with relevant experience)│
+├─────────────────────┼────────────────────────────────────────────────┤
+│ TraceCoder          │ tool.execute.before (add trace probes to bash)│
+│                     │ tool.execute.after (collect + analyze traces)  │
+├─────────────────────┼────────────────────────────────────────────────┤
+│ Context Engineering │ experimental.chat.system.transform             │
+│                     │ chat.params (model-tier-aware settings)        │
+│                     │ experimental.chat.messages.transform           │
+├─────────────────────┼────────────────────────────────────────────────┤
+│ Task Psychometrics  │ chat.message (analyze task difficulty)         │
+│                     │ chat.params (adjust strategy per difficulty)   │
+├─────────────────────┼────────────────────────────────────────────────┤
+│ FLARE Planning      │ [PATCH: mid-generation lookahead hook]        │
+│                     │ experimental.chat.system.transform             │
+└─────────────────────┴────────────────────────────────────────────────┘
+```
 
-### Phase 2: SWE-Replay (Week 2)
-- [ ] Trajectory serialization (capture full session execution trace)
-- [ ] Branch-point significance scoring (repo exploration heuristic)
-- [ ] Replay-or-explore decision logic
-- [ ] Integration with `run` mode (headless sessions)
-- [ ] Storage: trajectory DB with indexed branch points
+## 3. Storage Strategy
 
-**Why first:** Directly improves `opencode run` which we use daily via SSH.
-Medium complexity, high impact on multi-attempt tasks.
+**Separate SQLite database** (`~/.opencode/research.db`) — not OpenCode's main DB.
 
-### Phase 3: Meta-tools / AWO (Week 3)
-- [ ] Trace analysis: identify recurring tool-call sequences across sessions
-- [ ] Meta-tool generation: bundle sequences into composite tools
-- [ ] Registration in tool registry as regular tools
-- [ ] Automatic pattern discovery (configurable frequency threshold)
+Reasons:
+- No schema migration conflicts with upstream
+- Can nuke research data without affecting sessions
+- Simpler to backup/restore independently
 
-**Why second:** Builds on the trajectory capture from Phase 2.
-Reduces token cost and failure rate for repetitive workflows.
+Tables:
+- `trajectories` — full session execution traces (sessionID, steps, tool calls, results, timestamps)
+- `branch_points` — scored checkpoints within trajectories
+- `tool_patterns` — discovered recurring tool-call sequences
+- `meta_tools` — generated composite tool definitions
+- `experience_patterns` — extracted skills and subagent templates
+- `lessons` — historical lesson learning entries (failures + insights)
+- `task_features` — extracted task characteristics for IRT
 
-### Phase 4: Experience / AutoRefine (Week 4)
-- [ ] Post-session experience extraction (procedural → subagent, declarative → skill)
-- [ ] Experience pattern storage with scoring
-- [ ] Maintenance loop: prune low-score, merge similar patterns
-- [ ] Inject relevant experience into session context
+## 4. Configuration
 
-### Phase 5: FLARE Planning (Week 5+)
-- [ ] Lookahead reward estimation for plan agent
-- [ ] Value propagation from future states to current decisions
-- [ ] Limited commitment with rollback mechanism
-- [ ] Integration with plan agent's read-only analysis
+Plugin is configured in `opencode.json`:
 
-### Phase 6: TraceCoder (Week 6+)
-- [ ] Runtime trace collection for bash tool executions
-- [ ] Causal analysis on test failures
-- [ ] Historical lesson mechanism: learn from prior failed repairs
-- [ ] Rollback mechanism (leverage existing snapshot system)
-
-### Phase 7: Context Engineering (Ongoing)
-- [ ] Model-tier detection (frontier vs open-source)
-- [ ] Format selection based on Structured CE findings
-- [ ] MCE skill evolution (longer-term, more experimental)
-
-### Phase 8: Task Psychometrics (Ongoing)
-- [ ] Task feature extraction from issue/PR descriptions
-- [ ] IRT-based difficulty prediction
-- [ ] Route hard tasks to different strategies (more retries, planning-first, etc.)
-
-## 4. Upstream Compatibility Strategy
-
-### Merge Policy
-- `dev` branch: always tracks upstream `anomalyco/opencode:dev`
-- `research` branch: our additions on top of `dev`
-- Weekly upstream sync: `git fetch origin dev && git rebase origin/dev`
-- All research code in `src/research/` — merge conflicts only at integration points
-
-### Minimal Upstream Patches
-When we must modify upstream files, use:
-1. **Module augmentation** (extend interfaces/types without changing source)
-2. **Event-driven hooks** (subscribe to Bus events, don't modify emitters)
-3. **Layer composition** (wrap Effect services, don't replace them)
-4. **Plugin system** (if OpenCode's plugin architecture supports our needs)
-
-If upstream changes break an integration point, the research layer should
-degrade gracefully (disable that feature, log a warning).
-
-### Config Namespace
 ```json
 {
+  "plugins": ["@opencode-ai/research"],
   "research": {
-    "enabled": true,
-    "replay": { "enabled": true, "maxTrajectories": 100 },
-    "metaTools": { "enabled": false, "minFrequency": 3 },
-    "planning": { "enabled": false },
-    "experience": { "enabled": false },
-    "tracing": { "enabled": false }
+    "replay": {
+      "enabled": true,
+      "maxTrajectories": 100,
+      "branchScoreThreshold": 0.7
+    },
+    "metaTools": {
+      "enabled": false,
+      "minFrequency": 3,
+      "discoveryInterval": "daily"
+    },
+    "experience": {
+      "enabled": false,
+      "maxPatterns": 500,
+      "pruneThreshold": 0.3
+    },
+    "tracing": {
+      "enabled": false,
+      "maxLessons": 200
+    },
+    "context": {
+      "enabled": true,
+      "modelTierDetection": true
+    },
+    "psychometrics": {
+      "enabled": false
+    },
+    "planning": {
+      "enabled": false,
+      "lookaheadDepth": 3
+    }
   }
 }
 ```
 
-## 5. Tech Stack Notes
+## 5. Implementation Phases (Revised)
 
-- **Runtime:** Bun (packageManager: bun@1.3.13)
-- **Language:** TypeScript (strict)
-- **Effect system:** Effect (functional effects, layers, services)
-- **Storage:** Drizzle ORM + SQLite
-- **AI SDK:** Vercel AI SDK (`ai` package)
-- **Event system:** Custom Bus (pub/sub for session events)
-- **Testing:** Vitest (existing test infrastructure)
+### Phase 0: Plugin Scaffold (Day 1)
+- [ ] Create `packages/research/` with Bun + TypeScript
+- [ ] Plugin entry point implementing `Hooks` interface
+- [ ] Separate SQLite DB setup (`research.db`)
+- [ ] Config schema for research options
+- [ ] Register plugin in workspace `opencode.json`
+- [ ] Verify: plugin loads, hooks fire, events received
 
-## 6. Key Design Decisions
+### Phase 1: Trajectory Capture (Day 2-3)
+- [ ] `event` hook: listen for session lifecycle events
+- [ ] `tool.execute.after` hook: capture tool name, input, output, timing
+- [ ] Serialize full session trajectory to `research.db`
+- [ ] Record step-level snapshots (piggyback on OpenCode's existing `start-step`/`finish-step`)
+- [ ] Branch-point scoring: heuristic based on repo exploration significance
 
-### Why `src/research/` not a separate package?
-The research enhancements need deep access to session internals (processor,
-tool registry, agent definitions). A separate package would require exposing
-too many internal APIs. A directory within the main package keeps access simple
-while maintaining clear separation.
+**Deliverable:** Every `opencode run` automatically builds a trajectory DB.
 
-### Why feature flags?
-Each research module should be independently toggleable. Some are experimental,
-some may conflict, and we want to A/B test impact. Default: all off except
-trajectory capture (Phase 1).
+### Phase 2: SWE-Replay (Week 1-2)
+- [ ] Replay decision engine: given a task, find relevant prior trajectories
+- [ ] Branch-or-restart logic based on branch-point scores
+- [ ] Custom `/replay` tool: user can manually trigger replay from checkpoint
+- [ ] [PATCH] Session restore from mid-trajectory checkpoint
+- [ ] Integration with `opencode run` retry mode
 
-### Why Bus events over direct hooks?
-OpenCode's Bus is already used for session lifecycle events. Subscribing to
-events is non-invasive and survives upstream refactors. We only need direct
-patches for the few cases where Bus events don't carry enough context.
+**Deliverable:** Multi-attempt tasks cost 15-20% less.
+
+### Phase 3: Meta-tools / AWO (Week 2-3)
+- [ ] `tool.execute.after`: accumulate tool-call sequences across sessions
+- [ ] Pattern miner: identify recurring N-grams in tool-call traces
+- [ ] Meta-tool generator: create composite tool definitions
+- [ ] `tool`: register discovered meta-tools as available tools
+- [ ] `tool.execute.before`: intercept and run meta-tool sequences deterministically
+
+**Deliverable:** Repetitive workflows auto-compress into single tool calls.
+
+### Phase 4: Experience Extraction (Week 3-4)
+- [ ] Post-session analysis: extract procedural patterns (→ subagent templates) and declarative patterns (→ skill snippets)
+- [ ] `experimental.chat.system.transform`: inject relevant experience into system prompt
+- [ ] Maintenance loop: score patterns by reuse frequency, prune low-scorers, merge similar
+- [ ] Custom `/experience` tool: query and manage extracted patterns
+
+### Phase 5: Context Engineering (Week 4)
+- [ ] Model tier detection from provider/model info in `chat.params`
+- [ ] Format selection based on Structured CE findings (frontier: file-based; OSS: inline)
+- [ ] `experimental.chat.system.transform`: optimize system prompt structure
+- [ ] `experimental.chat.messages.transform`: optimize context format per model
+
+### Phase 6: TraceCoder (Week 5)
+- [ ] `tool.execute.before` on bash: inject trace probes (set -x, diagnostic prints)
+- [ ] `tool.execute.after` on bash: parse traces, run causal analysis
+- [ ] Historical lesson DB: store failure→insight pairs
+- [ ] `experimental.chat.system.transform`: inject relevant lessons for current task
+
+### Phase 7: FLARE Planning (Week 6+)
+- [ ] [PATCH] Add mid-generation hook to processor (PR upstream)
+- [ ] Lookahead reward estimation: evaluate N candidate next-steps
+- [ ] Value propagation: score early choices by downstream outcomes
+- [ ] Limited commitment: buffer choices, rollback bad ones
+- [ ] Integration with `plan` agent
+
+### Phase 8: Task Psychometrics (Week 7+)
+- [ ] Task feature extraction from issue/PR text
+- [ ] IRT model training on trajectory outcomes
+- [ ] `chat.message`: predict difficulty, annotate for downstream hooks
+- [ ] `chat.params`: adjust strategy (more retries, planning-first, etc.)
+
+## 6. Upstream Compatibility
+
+### Merge workflow
+```bash
+# Weekly sync
+git checkout dev
+git fetch origin dev
+git rebase origin/dev        # fast-forward or merge
+git checkout research
+git rebase dev               # replay our patches on latest upstream
+```
+
+### Patch inventory (to be tracked)
+| File | Change | Phase | PR candidate? |
+|---|---|---|---|
+| `session/processor.ts` | Mid-generation hook | Phase 7 | Yes |
+| `session/session.ts` | Checkpoint restore | Phase 2 | Yes |
+
+All other changes are plugin-only → zero merge conflicts.
+
+### Degradation
+If upstream breaks a hook, the plugin catches the error and disables that module.
+Research features never crash the main application.
 
 ## 7. Success Metrics
 
-| Module | Metric | Target |
-|---|---|---|
-| SWE-Replay | Cost reduction on multi-attempt tasks | >15% (per paper) |
-| Meta-tools | LLM calls reduction | >10% |
-| FLARE | Task completion on complex refactors | Measurable improvement |
-| AutoRefine | Step count reduction on repeated task types | >20% |
-| TraceCoder | Debug success rate on test failures | >30% improvement |
+| Module | Metric | Target | Measurement |
+|---|---|---|---|
+| Trajectory capture | Data completeness | 100% tool calls captured | Compare DB vs session history |
+| SWE-Replay | Cost reduction | >15% on multi-attempt | $/task with vs without |
+| Meta-tools | LLM calls saved | >10% | Count before/after |
+| Experience | Step reduction | >20% on repeated types | Steps with vs without |
+| Context CE | Token efficiency | Measurable | Tokens used per task |
+| TraceCoder | Debug success | >30% improvement | Pass rate on test failures |
+| FLARE | Complex task completion | Measurable | Success rate on long-horizon |
 
-## 8. References (Wiki)
+## 8. Tech Decisions
 
-All papers are documented in the `agentic-development` wiki:
-- [[swe-replay]], [[meta-tools]], [[flare]], [[autorefine]], [[tracecoder]]
-- [[structured-context-engineering]], [[meta-context-engineering]]
-- [[agent-psychometrics]], [[arena-framework-bench]], [[susvibes]]
+### Why a plugin package, not `src/research/`?
+The plugin hook system covers ~70% of our needs without touching upstream code at all.
+A plugin is the most upstream-compatible approach — it survives major refactors as long
+as the hook interface remains stable (which it will, since other plugins depend on it).
+
+### Why a separate SQLite DB?
+Research data is experimental and potentially large (full trajectories). Keeping it out
+of OpenCode's main DB means zero schema migration conflicts and easy cleanup.
+
+### Why Bun?
+OpenCode uses Bun. Our plugin must match the runtime.
+
+### Why not contribute everything upstream?
+We will — but research features need iteration first. Ship in our fork, validate,
+then PR the stable ones upstream. The plugin architecture makes this easy: once mature,
+the plugin can be published to npm for anyone to use.
+
+## 9. References
+
+All underlying papers documented in `wikis/agentic-development/`:
+- [[swe-replay]] — trajectory recycling (Jan 2026)
+- [[meta-tools]] — composite tool discovery (Jan 2026)
+- [[autorefine]] — experience extraction (Jan 2026)
+- [[flare]] — future-aware lookahead (Jan 2026)
+- [[tracecoder]] — trace-driven debugging (Feb 2026)
+- [[structured-context-engineering]] — format vs model capability (Feb 2026)
+- [[meta-context-engineering]] — automated CE (Jan 2026)
+- [[agent-psychometrics]] — IRT task prediction (Apr 2026)
+- [[arena-framework-bench]] — framework comparison (Apr 2026)
+- [[susvibes]] — security benchmark (Dec 2025)
