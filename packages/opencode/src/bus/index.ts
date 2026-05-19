@@ -1,24 +1,29 @@
-import z from "zod"
-import { Effect, Exit, Layer, PubSub, Scope, Context, Stream } from "effect"
-import { EffectBridge } from "@/effect"
-import { Log } from "../util"
+import { Effect, Exit, Layer, PubSub, Scope, Context, Stream, Schema } from "effect"
+import { EffectBridge } from "@/effect/bridge"
+import * as Log from "@opencode-ai/core/util/log"
 import { BusEvent } from "./bus-event"
 import { GlobalBus } from "./global"
-import { InstanceState } from "@/effect"
+import { InstanceState } from "@/effect/instance-state"
 import { makeRuntime } from "@/effect/run-service"
+import { Identifier } from "@/id/id"
+import type { InstanceContext } from "@/project/instance-context"
+import { InstanceRef } from "@/effect/instance-ref"
 
 const log = Log.create({ service: "bus" })
 
+type BusProperties<D extends BusEvent.Definition<string, Schema.Top>> = Schema.Schema.Type<D["properties"]>
+
 export const InstanceDisposed = BusEvent.define(
   "server.instance.disposed",
-  z.object({
-    directory: z.string(),
+  Schema.Struct({
+    directory: Schema.String,
   }),
 )
 
 type Payload<D extends BusEvent.Definition = BusEvent.Definition> = {
+  id: string
   type: D["type"]
-  properties: z.infer<D["properties"]>
+  properties: BusProperties<D>
 }
 
 type State = {
@@ -29,10 +34,19 @@ type State = {
 export interface Interface {
   readonly publish: <D extends BusEvent.Definition>(
     def: D,
-    properties: z.output<D["properties"]>,
+    properties: BusProperties<D>,
+    options?: { id?: string },
   ) => Effect.Effect<void>
-  readonly subscribe: <D extends BusEvent.Definition>(def: D) => Stream.Stream<Payload<D>>
-  readonly subscribeAll: () => Stream.Stream<Payload>
+  // subscribe / subscribeAll are eager: the underlying PubSub subscription is
+  // acquired in the caller's Scope at `yield*` time. Any publish after the
+  // yield is delivered, even if stream consumption starts later. The previous
+  // Stream-returning shape acquired the subscription lazily on first pull,
+  // opening a race window during which publishes were lost — see
+  // test/bus/bus-effect.test.ts RACE tests.
+  readonly subscribe: <D extends BusEvent.Definition>(
+    def: D,
+  ) => Effect.Effect<Stream.Stream<Payload<D>>, never, Scope.Scope>
+  readonly subscribeAll: () => Effect.Effect<Stream.Stream<Payload>, never, Scope.Scope>
   readonly subscribeCallback: <D extends BusEvent.Definition>(
     def: D,
     callback: (event: Payload<D>) => unknown,
@@ -55,6 +69,7 @@ export const layer = Layer.effect(
             // Publish InstanceDisposed before shutting down so subscribers see it
             yield* PubSub.publish(wildcard, {
               type: InstanceDisposed.type,
+              id: createID(),
               properties: { directory: ctx.directory },
             })
             yield* PubSub.shutdown(wildcard)
@@ -79,10 +94,10 @@ export const layer = Layer.effect(
       })
     }
 
-    function publish<D extends BusEvent.Definition>(def: D, properties: z.output<D["properties"]>) {
+    function publish<D extends BusEvent.Definition>(def: D, properties: BusProperties<D>, options?: { id?: string }) {
       return Effect.gen(function* () {
         const s = yield* InstanceState.get(state)
-        const payload: Payload = { type: def.type, properties }
+        const payload: Payload = { id: options?.id ?? createID(), type: def.type, properties }
         log.info("publishing", { type: def.type })
 
         const ps = s.typed.get(def.type)
@@ -102,26 +117,26 @@ export const layer = Layer.effect(
       })
     }
 
-    function subscribe<D extends BusEvent.Definition>(def: D): Stream.Stream<Payload<D>> {
-      log.info("subscribing", { type: def.type })
-      return Stream.unwrap(
-        Effect.gen(function* () {
-          const s = yield* InstanceState.get(state)
-          const ps = yield* getOrCreate(s, def)
-          return Stream.fromPubSub(ps)
-        }),
-      ).pipe(Stream.ensuring(Effect.sync(() => log.info("unsubscribing", { type: def.type }))))
-    }
+    const subscribe = <D extends BusEvent.Definition>(
+      def: D,
+    ): Effect.Effect<Stream.Stream<Payload<D>>, never, Scope.Scope> =>
+      Effect.gen(function* () {
+        log.info("subscribing", { type: def.type })
+        const s = yield* InstanceState.get(state)
+        const ps = yield* getOrCreate(s, def)
+        const subscription = yield* PubSub.subscribe(ps)
+        yield* Effect.addFinalizer(() => Effect.sync(() => log.info("unsubscribing", { type: def.type })))
+        return Stream.fromSubscription(subscription)
+      })
 
-    function subscribeAll(): Stream.Stream<Payload> {
-      log.info("subscribing", { type: "*" })
-      return Stream.unwrap(
-        Effect.gen(function* () {
-          const s = yield* InstanceState.get(state)
-          return Stream.fromPubSub(s.wildcard)
-        }),
-      ).pipe(Stream.ensuring(Effect.sync(() => log.info("unsubscribing", { type: "*" }))))
-    }
+    const subscribeAll = (): Effect.Effect<Stream.Stream<Payload>, never, Scope.Scope> =>
+      Effect.gen(function* () {
+        log.info("subscribing", { type: "*" })
+        const s = yield* InstanceState.get(state)
+        const subscription = yield* PubSub.subscribe(s.wildcard)
+        yield* Effect.addFinalizer(() => Effect.sync(() => log.info("unsubscribing", { type: "*" })))
+        return Stream.fromSubscription(subscription)
+      })
 
     function on<T>(pubsub: PubSub.PubSub<T>, type: string, callback: (event: T) => unknown) {
       return Effect.gen(function* () {
@@ -175,14 +190,20 @@ const { runPromise, runSync } = makeRuntime(Service, layer)
 
 // runSync is safe here because the subscribe chain (InstanceState.get, PubSub.subscribe,
 // Scope.make, Effect.forkScoped) is entirely synchronous. If any step becomes async, this will throw.
-export async function publish<D extends BusEvent.Definition>(def: D, properties: z.output<D["properties"]>) {
-  return runPromise((svc) => svc.publish(def, properties))
+export function createID() {
+  return Identifier.create("evt", "ascending")
 }
 
-export function subscribe<D extends BusEvent.Definition>(
+export async function publish<D extends BusEvent.Definition>(
+  ctx: InstanceContext,
   def: D,
-  callback: (event: { type: D["type"]; properties: z.infer<D["properties"]> }) => unknown,
+  properties: BusProperties<D>,
+  options?: { id?: string },
 ) {
+  return runPromise((svc) => svc.publish(def, properties, options).pipe(Effect.provideService(InstanceRef, ctx)))
+}
+
+export function subscribe<D extends BusEvent.Definition>(def: D, callback: (event: Payload<D>) => unknown) {
   return runSync((svc) => svc.subscribeCallback(def, callback))
 }
 
